@@ -130,20 +130,11 @@ jobs:
       - name: Set up paths
         run: |
           # MSYS2 needs POSIX paths; RUNNER_TEMP is a Windows path there.
-          # pkg-config there is a native Windows program, so it needs a
-          # Windows-style path in PKG_CONFIG_PATH.
-          if [ "$RUNNER_OS" = "Windows" ]; then
-            WORK=$(cygpath -u "$RUNNER_TEMP")
-            PCPATH=$(cygpath -m "$WORK/deps/lib/pkgconfig")
-          else
-            WORK=$RUNNER_TEMP
-            PCPATH=$WORK/deps/lib/pkgconfig
-          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then WORK=$(cygpath -u "$RUNNER_TEMP"); else WORK=$RUNNER_TEMP; fi
           {
             echo "WORK=$WORK"
             echo "PREFIX=$WORK/ffmpeg-lgpl"
             echo "DEPS=$WORK/deps"
-            echo "PKG_CONFIG_PATH=$PCPATH"
           } >> "$GITHUB_ENV"
 
       - name: Build third-party dependencies
@@ -151,6 +142,8 @@ jobs:
 
       - name: Configure
         run: |
+          # Set here rather than via GITHUB_ENV: MSYS2's login profile resets it.
+          export PKG_CONFIG_PATH="$DEPS/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
           EXTRA_FLAGS=(
             --extra-cflags="-I$DEPS/include"
             --extra-ldflags="-L$DEPS/lib"
