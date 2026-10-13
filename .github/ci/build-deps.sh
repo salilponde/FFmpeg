@@ -26,10 +26,13 @@ case "$(uname -s)" in
     MINGW*|UCRT*|MSYS*)   PLATFORM=windows; OS=win64    ;;
     *) echo "unsupported OS: $(uname -s)" >&2; exit 1 ;;
 esac
-case "$(uname -m)" in
+# MSYS2's own tools are x86_64 (emulated on Windows on ARM), so uname -m
+# is wrong there; MSYSTEM_CARCH names the architecture being targeted.
+MACHINE=${MSYSTEM_CARCH:-$(uname -m)}
+case "$MACHINE" in
     x86_64)        ARCH=x86_64 ;;
     arm64|aarch64) ARCH=arm64  ;;
-    *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+    *) echo "unsupported architecture: $MACHINE" >&2; exit 1 ;;
 esac
 if [ "$PLATFORM" = macos ]; then JOBS=$(sysctl -n hw.ncpu); else JOBS=$(nproc); fi
 # No NVIDIA or AMD GPUs exist for Windows on ARM.
