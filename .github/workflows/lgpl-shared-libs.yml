@@ -1,0 +1,416 @@
+# Builds LGPL-only shared FFmpeg libraries for Linux, macOS and Windows and
+# attaches them to a GitHub release.
+#
+#   * Push a tag matching "lgpl-*" (e.g. lgpl-8.0.0) -> build + publish release
+#   * Run manually (workflow_dispatch)               -> build only, artifacts
+#                                                       downloadable from the run
+#
+# LGPL notes:
+#   * Never add --enable-gpl, --enable-nonfree or --enable-version3 here, and
+#     only enable external libraries whose licenses are LGPL-compatible.
+#     The "Verify" steps fail the build if the result is not LGPLv2.1+.
+#   * --disable-autodetect keeps random runner packages from being linked in;
+#     everything external is opted into explicitly below.
+#   * A source tarball of the exact commit is attached to every release so the
+#     corresponding source is available alongside the binaries.
+
+name: LGPL shared libraries
+
+on:
+  push:
+    tags:
+      - 'lgpl-*'
+    # TEMPORARY: test builds from this branch; remove before merging.
+    branches:
+      - 'ci/lgpl-builds'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  # Oldest macOS the dylibs will load on (independent of the runner image).
+  MACOSX_DEPLOYMENT_TARGET: '11.0'
+  # Third-party sources, built/installed by .github/ci/build-deps.sh.
+  # Libraries are linked statically into FFmpeg (no extra runtime deps).
+  DAV1D_VERSION: '1.5.4'
+  LIBVPX_VERSION: 'v1.17.0'
+  # NVENC/NVDEC API headers (MIT). The header version sets the minimum NVIDIA
+  # driver needed at runtime: 12.1.x requires >= 530.41.03 (Linux) / 531.61 (Windows).
+  NV_CODEC_HEADERS_TAG: 'n12.1.14.0'
+  AMF_TAG: 'v1.5.3'      # AMD AMF headers (MIT), Windows only
+  ZLIB_VERSION: 'v1.3.1' # Windows only; Linux/macOS use the system zlib
+  # Codecs the verify steps require on every platform.
+  BSD_CODECS: dec:libdav1d dec:libvpx dec:libvpx-vp9 enc:libvpx enc:libvpx-vp9
+  COMMON_CONFIGURE_FLAGS: >-
+    --enable-shared
+    --disable-static
+    --enable-pic
+    --disable-programs
+    --disable-doc
+    --disable-debug
+    --disable-autodetect
+    --enable-zlib
+    --enable-libdav1d
+    --enable-libvpx
+    --pkg-config-flags=--static
+
+jobs:
+  build:
+    name: ${{ matrix.platform }}
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Oldest GitHub-hosted images still supported, to keep the glibc
+          # requirement low (Ubuntu 22.04 = glibc 2.35).
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            shell: bash
+            hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+            shell: bash
+            hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
+          # macOS compatibility is governed by MACOSX_DEPLOYMENT_TARGET.
+          - platform: macos-arm64
+            runner: macos-14
+            shell: bash
+            hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            shell: bash
+            hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
+          # MinGW-w64 (UCRT) build: DLLs plus MSVC-compatible .lib import
+          # libraries. Requires Windows 10+ (or the UCRT update on older).
+          - platform: windows-x86_64
+            runner: windows-2022
+            shell: msys2 {0}
+            hw_codecs: >-
+              enc:h264_mf enc:hevc_mf enc:h264_nvenc enc:hevc_nvenc
+              enc:h264_amf enc:hevc_amf
+
+    steps:
+      - name: Keep LF line endings (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: git config --global core.autocrlf false
+
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends nasm zlib1g-dev patchelf libva-dev \
+            pkg-config meson ninja-build
+
+      - name: Install build dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: brew install nasm meson ninja pkgconf
+
+      - name: Install build dependencies (Windows)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git make diffutils perl zip
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-nasm
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-ninja
+
+      - name: Set up paths
+        run: |
+          # MSYS2 needs POSIX paths; RUNNER_TEMP is a Windows path there.
+          if [ "$RUNNER_OS" = "Windows" ]; then WORK=$(cygpath -u "$RUNNER_TEMP"); else WORK=$RUNNER_TEMP; fi
+          {
+            echo "WORK=$WORK"
+            echo "PREFIX=$WORK/ffmpeg-lgpl"
+            echo "DEPS=$WORK/deps"
+            echo "PKG_CONFIG_PATH=$WORK/deps/lib/pkgconfig"
+          } >> "$GITHUB_ENV"
+
+      - name: Build third-party dependencies
+        run: .github/ci/build-deps.sh "$DEPS" "$WORK/deps-src"
+
+      - name: Configure
+        run: |
+          EXTRA_FLAGS=(
+            --extra-cflags="-I$DEPS/include"
+            --extra-ldflags="-L$DEPS/lib"
+          )
+          if [ "$RUNNER_OS" != "macOS" ]; then
+            # NVIDIA support is loaded at runtime; no link-time deps.
+            EXTRA_FLAGS+=(
+              --enable-ffnvcodec
+              --enable-cuda
+              --enable-nvenc
+              --enable-nvdec
+              --enable-cuvid
+            )
+          fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # VAAPI (Intel/AMD) links against libva/libva-drm (MIT).
+            EXTRA_FLAGS+=(--enable-vaapi)
+          fi
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            EXTRA_FLAGS+=(
+              --install-name-dir=@rpath
+              --enable-videotoolbox
+              --enable-audiotoolbox
+              --extra-cflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+              --extra-ldflags="-mmacosx-version-min=$MACOSX_DEPLOYMENT_TARGET"
+            )
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # All of these use system components or are loaded at runtime.
+            # -static keeps libgcc/winpthread out of the DLL dependencies.
+            EXTRA_FLAGS+=(
+              --enable-w32threads
+              --enable-d3d11va
+              --enable-d3d12va
+              --enable-dxva2
+              --enable-mediafoundation
+              --enable-amf
+              --extra-ldflags=-static
+            )
+          fi
+
+          ./configure --prefix="$PREFIX" $COMMON_CONFIGURE_FLAGS "${EXTRA_FLAGS[@]}" \
+            || { tail -n 100 ffbuild/config.log; exit 1; }
+
+      - name: Build
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then JOBS=$(sysctl -n hw.ncpu); else JOBS=$(nproc); fi
+          make -j"$JOBS"
+          make install
+
+      - name: Make package relocatable
+        run: |
+          cd "$PREFIX"
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            # Let the libraries find each other next to themselves.
+            find lib -maxdepth 1 -type f -name '*.so.*' -exec patchelf --set-rpath '$ORIGIN' {} +
+          fi
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            # FFmpeg installs the MSVC import libraries next to the DLLs.
+            mv bin/*.lib lib/
+          fi
+          # pkg-config files otherwise point at the CI install prefix.
+          perl -pi -e 's|^prefix=.*|prefix=\${pcfiledir}/../..|' lib/pkgconfig/*.pc
+
+      - name: Verify license, codecs and linkage
+        run: |
+          set -o pipefail
+          LIBS="-lavdevice -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            gcc .github/ci/license_check.c -o "$WORK/license_check.exe" \
+              -I"$PREFIX/include" -L"$PREFIX/lib" $LIBS
+            export PATH="$PREFIX/bin:$PATH"
+          else
+            cc .github/ci/license_check.c -o "$WORK/license_check" \
+              -I"$PREFIX/include" -L"$PREFIX/lib" -Wl,-rpath,"$PREFIX/lib" $LIBS
+          fi
+          "$WORK/license_check" $BSD_CODECS ${{ matrix.hw_codecs }} | tee "$WORK/license_check.txt"
+
+          case "$RUNNER_OS" in
+            macOS) otool -L "$PREFIX"/lib/libavcodec.*.dylib ;;
+            Linux) ldd "$PREFIX"/lib/libavcodec.so.*.* "$PREFIX"/lib/libavutil.so.*.* ;;
+            Windows)
+              # Only Windows system DLLs (and our own) may be imported.
+              bad=0
+              for d in $(objdump -p "$PREFIX"/bin/*.dll | awk '/DLL Name:/ { print $3 }' | sort -fu); do
+                case "$d" in
+                  av*-[0-9]*.dll|sw*-[0-9]*.dll|api-ms-win-*) echo "ok: $d"; continue ;;
+                esac
+                if [ -e "/c/Windows/System32/$d" ]; then
+                  echo "ok (system): $d"
+                else
+                  echo "::error::non-system DLL dependency: $d"
+                  bad=1
+                fi
+              done
+              exit $bad
+              ;;
+          esac
+
+      # Proves the import libraries and headers work from a Visual C++ project.
+      - name: Set up MSVC (Windows)
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Verify with MSVC (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set "P=%RUNNER_TEMP%\ffmpeg-lgpl"
+          cl /nologo /I"%P%\include" .github\ci\license_check.c /Fe:"%RUNNER_TEMP%\license_check_msvc.exe" ^
+            /link /LIBPATH:"%P%\lib" avdevice.lib avfilter.lib avformat.lib avcodec.lib swscale.lib swresample.lib avutil.lib || exit /b 1
+          set "PATH=%P%\bin;%PATH%"
+          "%RUNNER_TEMP%\license_check_msvc.exe" %BSD_CODECS% ${{ matrix.hw_codecs }} || exit /b 1
+
+      - name: Package
+        run: |
+          VERSION="${GITHUB_REF_NAME#lgpl-}"
+          [ "$GITHUB_REF_TYPE" = "tag" ] || VERSION="$(git rev-parse --short HEAD)"
+          NAME="ffmpeg-lgpl-$VERSION-${{ matrix.platform }}"
+
+          cp LICENSE.md COPYING.LGPLv2.1 "$PREFIX/"
+          cp -R "$DEPS/licenses" "$PREFIX/licenses"
+          {
+            echo "FFmpeg $(cat RELEASE) built from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
+            echo "Runner: ${{ matrix.runner }}"
+            echo "dav1d $DAV1D_VERSION, libvpx $LIBVPX_VERSION (static)"
+            if [ "$RUNNER_OS" != "macOS" ]; then
+              echo "nv-codec-headers $NV_CODEC_HEADERS_TAG"
+            fi
+            if [ "$RUNNER_OS" = "Windows" ]; then
+              echo "AMF headers $AMF_TAG, zlib $ZLIB_VERSION (static)"
+            fi
+            if [ "$RUNNER_OS" = "macOS" ]; then
+              echo "MACOSX_DEPLOYMENT_TARGET: $MACOSX_DEPLOYMENT_TARGET"
+            fi
+            echo
+            echo "Configuration:"
+            sed -n 's/^configuration: //p' "$WORK/license_check.txt"
+          } > "$PREFIX/BUILDINFO.txt"
+
+          mkdir -p dist
+          mv "$PREFIX" "$WORK/$NAME"
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            (cd "$WORK" && zip -qr - "$NAME") > "dist/$NAME.zip"
+          else
+            tar -C "$WORK" -czf "dist/$NAME.tar.gz" "$NAME"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Merges the arm64 and x86_64 macOS builds into universal dylibs with lipo.
+  # Both builds use @rpath install names, so inter-library references resolve
+  # identically in each slice.
+  macos-universal:
+    needs: build
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: macos-*
+          path: in
+          merge-multiple: true
+
+      - name: Merge with lipo
+        run: |
+          ARM_TGZ=$(ls in/*-macos-arm64.tar.gz)
+          X86_TGZ=$(ls in/*-macos-x86_64.tar.gz)
+          ARM=$(basename "$ARM_TGZ" .tar.gz)
+          X86=$(basename "$X86_TGZ" .tar.gz)
+          NAME="${ARM%-macos-arm64}-macos-universal"
+          W="$RUNNER_TEMP/work"
+          mkdir -p "$W"
+          tar -C "$W" -xzf "$ARM_TGZ"
+          tar -C "$W" -xzf "$X86_TGZ"
+
+          # Installed headers must be architecture independent; prove it.
+          diff -r "$W/$ARM/include" "$W/$X86/include"
+
+          # Start from the arm64 tree (keeps symlinks, headers, pkg-config,
+          # licenses), then replace every real dylib with a fat one.
+          ditto "$W/$ARM" "$W/$NAME"
+          find "$W/$ARM/lib" -maxdepth 1 -type f -name '*.dylib' | while read -r f; do
+            lib=$(basename "$f")
+            lipo -create "$f" "$W/$X86/lib/$lib" -output "$W/$NAME/lib/$lib"
+            archs=$(lipo -archs "$W/$NAME/lib/$lib")
+            echo "$lib: $archs"
+            for a in arm64 x86_64; do
+              echo "$archs" | grep -qw "$a" || { echo "$lib is missing $a"; exit 1; }
+            done
+          done
+
+          {
+            echo "Universal (arm64 + x86_64) merge of $ARM and $X86."
+            echo
+            echo "== arm64 =="
+            cat "$W/$ARM/BUILDINFO.txt"
+            echo
+            echo "== x86_64 =="
+            cat "$W/$X86/BUILDINFO.txt"
+          } > "$W/$NAME/BUILDINFO.txt"
+
+          echo "W=$W" >> "$GITHUB_ENV"
+          echo "NAME=$NAME" >> "$GITHUB_ENV"
+
+      - name: Verify universal libraries
+        run: |
+          LIB="$W/$NAME/lib"
+          cc -arch arm64 -arch x86_64 .github/ci/license_check.c -o "$RUNNER_TEMP/license_check" \
+            -I"$W/$NAME/include" -L"$LIB" -Wl,-rpath,"$LIB" \
+            -lavdevice -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil
+          arch -arm64 "$RUNNER_TEMP/license_check" $BSD_CODECS enc:h264_videotoolbox enc:hevc_videotoolbox
+          # The x86_64 slice can only be executed when Rosetta is installed.
+          if arch -x86_64 /usr/bin/true 2>/dev/null; then
+            arch -x86_64 "$RUNNER_TEMP/license_check" $BSD_CODECS enc:h264_videotoolbox enc:hevc_videotoolbox
+          else
+            echo "::notice::Rosetta not available; x86_64 slice checked by lipo only"
+          fi
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -C "$W" -czf "dist/$NAME.tar.gz" "$NAME"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-universal
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build, macos-universal]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Create source tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#lgpl-}"
+          git archive --format=tar.gz --prefix="ffmpeg-lgpl-$VERSION-source/" \
+            -o "dist/ffmpeg-lgpl-$VERSION-source.tar.gz" HEAD
+
+      - name: Checksums
+        run: cd dist && sha256sum *.tar.gz *.zip > SHA256SUMS.txt
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release create "$GITHUB_REF_NAME" --title "FFmpeg LGPL shared libraries $GITHUB_REF_NAME" \
+              --notes "LGPL v2.1+ shared builds of the FFmpeg libraries (no GPL or nonfree components). Corresponding source is attached."
+          fi
+          gh release upload "$GITHUB_REF_NAME" dist/* --clobber
