@@ -92,6 +92,11 @@ git clone --depth 1 --branch "$LIBVPX_VERSION" \
     https://chromium.googlesource.com/webm/libvpx "$SRC/libvpx"
 (
     cd "$SRC/libvpx"
+    # libvpx links with (and builds C++ via) gcc unless told otherwise.
+    case "${CC:-}" in
+        clang) export LD=clang CXX=clang++ ;;
+        gcc)   export LD=gcc   CXX=g++     ;;
+    esac
     ./configure --prefix="$PREFIX" --target="$ARCH-$OS-gcc" \
         --enable-static --disable-shared --enable-pic \
         --enable-vp8 --enable-vp9 --enable-vp9-highbitdepth \
