@@ -130,12 +130,20 @@ jobs:
       - name: Set up paths
         run: |
           # MSYS2 needs POSIX paths; RUNNER_TEMP is a Windows path there.
-          if [ "$RUNNER_OS" = "Windows" ]; then WORK=$(cygpath -u "$RUNNER_TEMP"); else WORK=$RUNNER_TEMP; fi
+          # pkg-config there is a native Windows program, so it needs a
+          # Windows-style path in PKG_CONFIG_PATH.
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            WORK=$(cygpath -u "$RUNNER_TEMP")
+            PCPATH=$(cygpath -m "$WORK/deps/lib/pkgconfig")
+          else
+            WORK=$RUNNER_TEMP
+            PCPATH=$WORK/deps/lib/pkgconfig
+          fi
           {
             echo "WORK=$WORK"
             echo "PREFIX=$WORK/ffmpeg-lgpl"
             echo "DEPS=$WORK/deps"
-            echo "PKG_CONFIG_PATH=$WORK/deps/lib/pkgconfig"
+            echo "PKG_CONFIG_PATH=$PCPATH"
           } >> "$GITHUB_ENV"
 
       - name: Build third-party dependencies
