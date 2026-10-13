@@ -66,26 +66,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # TEMPORARY: Linux/macOS disabled while fixing Windows; uncomment to restore.
-#         # Oldest GitHub-hosted images still supported, to keep the glibc
-#         # requirement low (Ubuntu 22.04 = glibc 2.35).
-#         - platform: linux-x86_64
-#           runner: ubuntu-22.04
-#           shell: bash
-#           hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
-#         - platform: linux-arm64
-#           runner: ubuntu-22.04-arm
-#           shell: bash
-#           hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
-#         # macOS compatibility is governed by MACOSX_DEPLOYMENT_TARGET.
-#         - platform: macos-arm64
-#           runner: macos-14
-#           shell: bash
-#           hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
-#         - platform: macos-x86_64
-#           runner: macos-15-intel
-#           shell: bash
-#           hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
+          # Oldest GitHub-hosted images still supported, to keep the glibc
+          # requirement low (Ubuntu 22.04 = glibc 2.35).
+          - platform: linux-x86_64
+            runner: ubuntu-22.04
+            shell: bash
+            hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
+          - platform: linux-arm64
+            runner: ubuntu-22.04-arm
+            shell: bash
+            hw_codecs: enc:h264_vaapi enc:hevc_vaapi enc:h264_nvenc enc:hevc_nvenc
+          # macOS compatibility is governed by MACOSX_DEPLOYMENT_TARGET.
+          - platform: macos-arm64
+            runner: macos-14
+            shell: bash
+            hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
+          - platform: macos-x86_64
+            runner: macos-15-intel
+            shell: bash
+            hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
           # MinGW-w64 (UCRT) builds: DLLs plus MSVC-compatible .lib import
           # libraries. Require Windows 10+ (or the UCRT update on older).
           - platform: windows-x86_64
@@ -327,7 +326,6 @@ jobs:
   # Both builds use @rpath install names, so inter-library references resolve
   # identically in each slice.
   macos-universal:
-    if: false  # TEMPORARY: macOS builds disabled while fixing Windows.
     needs: build
     runs-on: macos-14
     steps:
