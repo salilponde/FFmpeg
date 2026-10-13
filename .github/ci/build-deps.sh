@@ -6,8 +6,10 @@
 #
 # usage: build-deps.sh <install-prefix> <scratch-dir>
 # env:   DAV1D_VERSION, LIBVPX_VERSION                  (all platforms)
-#        NV_CODEC_HEADERS_TAG                           (Linux, Windows)
-#        AMF_TAG, ZLIB_VERSION                          (Windows)
+#        NV_CODEC_HEADERS_TAG                           (Linux, Windows x86_64)
+#        AMF_TAG                                        (Windows x86_64)
+#        ZLIB_VERSION                                   (Windows)
+#        CC                                             (optional compiler)
 #        MACOSX_DEPLOYMENT_TARGET                       (macOS)
 #
 # License texts are installed to <install-prefix>/licenses.
@@ -30,6 +32,9 @@ case "$(uname -m)" in
     *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
 esac
 if [ "$PLATFORM" = macos ]; then JOBS=$(sysctl -n hw.ncpu); else JOBS=$(nproc); fi
+# No NVIDIA or AMD GPUs exist for Windows on ARM.
+GPU_SDKS=yes
+if [ "$PLATFORM" = windows ] && [ "$ARCH" = arm64 ]; then GPU_SDKS=no; fi
 
 # Prints the leading comment block (the license notice) of a source file.
 header_notice() {
@@ -38,7 +43,7 @@ header_notice() {
 
 # NVENC/NVDEC API headers (MIT). Header-only; the dynamic loader is compiled
 # into FFmpeg, so the notices go into the license bundle.
-if [ "$PLATFORM" != macos ]; then
+if [ "$PLATFORM" != macos ] && [ "$GPU_SDKS" = yes ]; then
     git clone --depth 1 --branch "$NV_CODEC_HEADERS_TAG" \
         https://github.com/FFmpeg/nv-codec-headers.git "$SRC/nv-codec-headers"
     make -C "$SRC/nv-codec-headers" install PREFIX="$PREFIX"
@@ -49,7 +54,7 @@ if [ "$PLATFORM" != macos ]; then
     done > "$PREFIX/licenses/nv-codec-headers-LICENSE.txt"
 fi
 
-if [ "$PLATFORM" = windows ]; then
+if [ "$PLATFORM" = windows ] && [ "$GPU_SDKS" = yes ]; then
     # AMD AMF headers (MIT). Header-only; the runtime is loaded on demand.
     git clone --depth 1 --branch "$AMF_TAG" --filter=blob:none --sparse \
         https://github.com/GPUOpen-LibrariesAndSDKs/AMF "$SRC/amf"
@@ -57,11 +62,13 @@ if [ "$PLATFORM" = windows ]; then
     mkdir -p "$PREFIX/include/AMF"
     cp -R "$SRC/amf/amf/public/include/." "$PREFIX/include/AMF/"
     cp "$SRC/amf/LICENSE.txt" "$PREFIX/licenses/amf-LICENSE.txt"
+fi
 
+if [ "$PLATFORM" = windows ]; then
     # zlib (zlib license). Windows has no system zlib, so link it statically.
     git clone --depth 1 --branch "$ZLIB_VERSION" \
         https://github.com/madler/zlib.git "$SRC/zlib"
-    make -C "$SRC/zlib" -f win32/Makefile.gcc -j"$JOBS" libz.a
+    make -C "$SRC/zlib" -f win32/Makefile.gcc -j"$JOBS" CC="${CC:-gcc}" AR=ar libz.a
     cp "$SRC/zlib/zlib.h" "$SRC/zlib/zconf.h" "$PREFIX/include/"
     cp "$SRC/zlib/libz.a" "$PREFIX/lib/"
     cp "$SRC/zlib/LICENSE" "$PREFIX/licenses/zlib-LICENSE"

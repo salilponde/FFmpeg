@@ -85,14 +85,28 @@ jobs:
             runner: macos-15-intel
             shell: bash
             hw_codecs: enc:h264_videotoolbox enc:hevc_videotoolbox
-          # MinGW-w64 (UCRT) build: DLLs plus MSVC-compatible .lib import
-          # libraries. Requires Windows 10+ (or the UCRT update on older).
+          # MinGW-w64 (UCRT) builds: DLLs plus MSVC-compatible .lib import
+          # libraries. Require Windows 10+ (or the UCRT update on older).
           - platform: windows-x86_64
             runner: windows-2022
             shell: msys2 {0}
+            msystem: UCRT64
+            pacboy: gcc:p nasm:p pkgconf:p meson:p ninja:p
+            cc: gcc
+            msvc_arch: x64
             hw_codecs: >-
               enc:h264_mf enc:hevc_mf enc:h264_nvenc enc:hevc_nvenc
               enc:h264_amf enc:hevc_amf
+          # Windows on ARM (e.g. Snapdragon). Built with clang; no NVIDIA/AMD
+          # GPUs on this platform, so hardware encoding is via Media Foundation.
+          - platform: windows-arm64
+            runner: windows-11-arm
+            shell: msys2 {0}
+            msystem: CLANGARM64
+            pacboy: toolchain:p pkgconf:p meson:p ninja:p
+            cc: clang
+            msvc_arch: arm64
+            hw_codecs: enc:h264_mf enc:hevc_mf
 
     steps:
       - name: Keep LF line endings (Windows)
@@ -117,15 +131,10 @@ jobs:
         if: runner.os == 'Windows'
         uses: msys2/setup-msys2@v2
         with:
-          msystem: UCRT64
+          msystem: ${{ matrix.msystem }}
           update: true
-          install: >-
-            git make diffutils perl zip
-            mingw-w64-ucrt-x86_64-gcc
-            mingw-w64-ucrt-x86_64-nasm
-            mingw-w64-ucrt-x86_64-pkgconf
-            mingw-w64-ucrt-x86_64-meson
-            mingw-w64-ucrt-x86_64-ninja
+          install: git make diffutils perl zip
+          pacboy: ${{ matrix.pacboy }}
 
       - name: Set up paths
         run: |
@@ -135,6 +144,7 @@ jobs:
             echo "WORK=$WORK"
             echo "PREFIX=$WORK/ffmpeg-lgpl"
             echo "DEPS=$WORK/deps"
+            if [ -n "${{ matrix.cc }}" ]; then echo "CC=${{ matrix.cc }}"; fi
           } >> "$GITHUB_ENV"
 
       - name: Build third-party dependencies
@@ -148,7 +158,12 @@ jobs:
             --extra-cflags="-I$DEPS/include"
             --extra-ldflags="-L$DEPS/lib"
           )
-          if [ "$RUNNER_OS" != "macOS" ]; then
+          if [ -n "${CC:-}" ]; then
+            EXTRA_FLAGS+=(--cc="$CC")
+          fi
+          WIN_ARM64=no
+          if [ "$RUNNER_OS" = "Windows" ] && [ "$RUNNER_ARCH" = "ARM64" ]; then WIN_ARM64=yes; fi
+          if [ "$RUNNER_OS" != "macOS" ] && [ "$WIN_ARM64" = no ]; then
             # NVIDIA support is loaded at runtime; no link-time deps.
             EXTRA_FLAGS+=(
               --enable-ffnvcodec
@@ -180,9 +195,11 @@ jobs:
               --enable-d3d12va
               --enable-dxva2
               --enable-mediafoundation
-              --enable-amf
               --extra-ldflags=-static
             )
+            if [ "$WIN_ARM64" = no ]; then
+              EXTRA_FLAGS+=(--enable-amf)
+            fi
           fi
 
           ./configure --prefix="$PREFIX" $COMMON_CONFIGURE_FLAGS "${EXTRA_FLAGS[@]}" \
@@ -213,7 +230,7 @@ jobs:
           set -o pipefail
           LIBS="-lavdevice -lavfilter -lavformat -lavcodec -lswscale -lswresample -lavutil"
           if [ "$RUNNER_OS" = "Windows" ]; then
-            gcc .github/ci/license_check.c -o "$WORK/license_check.exe" \
+            "$CC" .github/ci/license_check.c -o "$WORK/license_check.exe" \
               -I"$PREFIX/include" -L"$PREFIX/lib" $LIBS
             export PATH="$PREFIX/bin:$PATH"
           else
@@ -248,7 +265,7 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/msvc-dev-cmd@v1
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
 
       - name: Verify with MSVC (Windows)
         if: runner.os == 'Windows'
@@ -272,11 +289,16 @@ jobs:
             echo "FFmpeg $(cat RELEASE) built from ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/commit/${GITHUB_SHA}"
             echo "Runner: ${{ matrix.runner }}"
             echo "dav1d $DAV1D_VERSION, libvpx $LIBVPX_VERSION (static)"
-            if [ "$RUNNER_OS" != "macOS" ]; then
-              echo "nv-codec-headers $NV_CODEC_HEADERS_TAG"
-            fi
+            for f in nv-codec-headers amf; do
+              if [ -e "$DEPS/licenses/$f-LICENSE.txt" ]; then
+                case $f in
+                  nv-codec-headers) echo "nv-codec-headers $NV_CODEC_HEADERS_TAG" ;;
+                  amf) echo "AMF headers $AMF_TAG" ;;
+                esac
+              fi
+            done
             if [ "$RUNNER_OS" = "Windows" ]; then
-              echo "AMF headers $AMF_TAG, zlib $ZLIB_VERSION (static)"
+              echo "zlib $ZLIB_VERSION (static)"
             fi
             if [ "$RUNNER_OS" = "macOS" ]; then
               echo "MACOSX_DEPLOYMENT_TARGET: $MACOSX_DEPLOYMENT_TARGET"
